@@ -102,23 +102,74 @@ async function generateQuestion(previousThemes: string[]): Promise<Question> {
   }
 }
 
-// ─── Mock result（Step 4 で分析 API に差し替え） ───────────────────────────────
+// ─── Analysis API ─────────────────────────────────────────────────────────────
 
-const MOCK_RESULT: Result = {
-  scores: { ethics: 72, will: 38, individual: 61, ontology: 45, judgment: 68 },
-  analysis: `あなたの思考には、感情と論理が複雑に絡み合っています。倫理的判断においては義務論的な傾向が強く、「どんな結果であれ、原則を守ること」に重きを置いています。一方で、感情主義的な直感も強く働いており、純粋な論理だけでなく、人間的な温かみを判断の軸に据えているようです。\n\n意志と因果については決定論寄りの世界観をお持ちです。個人と全体のバランスでは、個人の権利を尊重しながらも共同体の調和を意識する中間的な立場にあります。存在論では唯物論と観念論の境界に位置し、物質世界と精神世界の両方に価値を見出しています。`,
-  philosophers: [
+function buildAnalysisPrompt(questions: Question[], answers: Answer[]): string {
+  const qa = answers.map((a) => {
+    const q = questions[a.questionIndex]
+    const choice = q?.choices.find((c) => c.id === a.choiceId)
+    return `【問${a.questionIndex + 1}】テーマ：${q?.theme}
+シナリオ：${q?.scenario}
+選択：${a.choiceId}. ${choice?.text ?? ''}${a.reason ? `\n理由：${a.reason}` : ''}`
+  }).join('\n\n')
+
+  return `あなたは哲学的思考分析の専門家です。
+以下のユーザーの回答を分析し、5つの哲学軸それぞれのスコアと分析文を生成してください。
+
+## ユーザーの回答
+${qa}
+
+## 5つの哲学軸（各0〜100でスコアリング）
+- ethics: 功利主義（0）⇔ 義務論（100）
+- will: 決定論（0）⇔ 自由意志（100）
+- individual: 共同体主義（0）⇔ 個人主義（100）
+- ontology: 唯物論（0）⇔ 観念論（100）
+- judgment: 感情主義（0）⇔ 理性主義（100）
+
+## 出力フォーマット（JSONのみ、他のテキスト不要）
+{
+  "scores": {
+    "ethics": <0-100>,
+    "will": <0-100>,
+    "individual": <0-100>,
+    "ontology": <0-100>,
+    "judgment": <0-100>
+  },
+  "analysis": "ユーザーの思考傾向の分析文（200〜350字）",
+  "philosophers": [
     {
-      name: 'イマヌエル・カント',
-      description: 'ドイツ観念論の巨匠',
-      reason: 'あなたと同様に、行為の結果よりも行為そのものの原則（義務）を重視する傾向があります。「人を手段としてのみ扱ってはならない」というカントの定言命法は、あなたの思考に強く共鳴するでしょう。',
+      "name": "哲学者名",
+      "description": "哲学者の簡潔な説明（20字以内）",
+      "reason": "この哲学者と共鳴する理由（80〜120字）"
+    }
+  ]
+}
+
+analysisは回答の具体的な内容を反映した個別の分析にしてください。philosophersは2〜3人選び、選択理由にはユーザーの実際の回答パターンを具体的に言及してください。`
+}
+
+async function analyzeAnswers(questions: Question[], answers: Answer[]): Promise<Result> {
+  const response = await client.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 2048,
+    messages: [{ role: 'user', content: buildAnalysisPrompt(questions, answers) }],
+  })
+
+  const raw = response.content[0].type === 'text' ? response.content[0].text : ''
+  const jsonText = raw.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '')
+  const parsed = JSON.parse(jsonText)
+
+  return {
+    scores: {
+      ethics: parsed.scores.ethics,
+      will: parsed.scores.will,
+      individual: parsed.scores.individual,
+      ontology: parsed.scores.ontology,
+      judgment: parsed.scores.judgment,
     },
-    {
-      name: 'デイヴィッド・ヒューム',
-      description: 'スコットランド啓蒙主義の哲学者',
-      reason: '理性よりも感情・情念が道徳の根底にあるというヒュームの立場は、あなたの感情主義的な判断スタイルと重なります。',
-    },
-  ],
+    analysis: parsed.analysis,
+    philosophers: parsed.philosophers,
+  }
 }
 
 // ─── IntroScreen ─────────────────────────────────────────────────────────────
@@ -403,6 +454,7 @@ export default function App() {
   const [themes, setThemes] = useState<string[]>([])
   const [isLoadingQuestion, setIsLoadingQuestion] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [result, setResult] = useState<Result | null>(null)
 
   // 次の問題を先読みして保持する Promise
   const prefetchRef = useRef<Promise<Question> | null>(null)
@@ -411,9 +463,16 @@ export default function App() {
 
   useEffect(() => {
     if (phase !== 'analyzing') return
-    const timer = setTimeout(() => setPhase('result'), 2500)
-    return () => clearTimeout(timer)
-  }, [phase])
+    analyzeAnswers(questions, answers)
+      .then((r) => {
+        setResult(r)
+        setPhase('result')
+      })
+      .catch(() => {
+        // 分析失敗時もフォールバックせず、エラーを表示できるよう result を null のまま result フェーズへ
+        setPhase('result')
+      })
+  }, [phase]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 先読み開始
   const startPrefetch = (currentThemes: string[]) => {
@@ -465,6 +524,7 @@ export default function App() {
     setQuestions([])
     setAnswers([])
     setThemes([])
+    setResult(null)
     await loadNextQuestion(0, [])
   }
 
@@ -524,7 +584,13 @@ export default function App() {
 
         {phase === 'result' && (
           <div key="result" className="animate-fade-in">
-            <ResultScreen result={MOCK_RESULT} />
+            {result ? (
+              <ResultScreen result={result} />
+            ) : (
+              <div className="flex flex-col items-center justify-center min-h-screen px-8 text-center">
+                <p className="text-[#e8e4df]/50 text-sm">分析の取得に失敗しました。もう一度お試しください。</p>
+              </div>
+            )}
           </div>
         )}
       </div>
