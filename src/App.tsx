@@ -1,15 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
-import Anthropic from '@anthropic-ai/sdk'
 import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer,
 } from 'recharts'
-
-// ─── Anthropic client ─────────────────────────────────────────────────────────
-
-const client = new Anthropic({
-  apiKey: import.meta.env.VITE_ANTHROPIC_API_KEY,
-  dangerouslyAllowBrowser: true,
-})
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,123 +45,24 @@ interface Result {
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 
-function buildQuestionPrompt(previousThemes: string[]): string {
-  return `あなたは哲学的思考実験の設計者です。
-以下の条件で新しい思考実験を1つ生成してください。
-
-## 条件
-- 古典的な哲学問題（トロッコ問題、テセウスの船、中国語の部屋、水槽の脳、無知のヴェール等）を参考にしつつ、独自のシナリオにする
-- 選択肢は2〜3つ。どれも一理ある内容にする
-- シナリオは200〜300字、具体的で想像しやすい状況描写
-- 以下の哲学軸のうち、主に1〜2軸を測定できる内容にする:
-  功利主義⇔義務論 / 決定論⇔自由意志 / 個人主義⇔共同体主義 / 唯物論⇔観念論 / 理性主義⇔感情主義
-- これまでの出題と異なるテーマ・軸を優先する
-
-## これまでの出題テーマ
-${previousThemes.length > 0 ? previousThemes.join('\n') : 'なし'}
-
-## 出力フォーマット（JSONのみ、他のテキスト不要）
-{
-  "scenario": "思考実験のシナリオ",
-  "choices": [
-    {"id": "A", "text": "選択肢A"},
-    {"id": "B", "text": "選択肢B"},
-    {"id": "C", "text": "選択肢C（任意）"}
-  ],
-  "theme": "この問題のテーマ（短い説明）",
-  "target_axes": ["測定対象の軸名"]
-}`
-}
-
 async function generateQuestion(previousThemes: string[]): Promise<Question> {
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
-    messages: [{ role: 'user', content: buildQuestionPrompt(previousThemes) }],
+  const res = await fetch('/api/generate-question', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ previousThemes }),
   })
-
-  const raw = response.content[0].type === 'text' ? response.content[0].text : ''
-
-  // バッククォートで囲まれていた場合に除去
-  const jsonText = raw.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '')
-
-  const parsed = JSON.parse(jsonText)
-  return {
-    scenario: parsed.scenario,
-    choices: parsed.choices,
-    theme: parsed.theme,
-    target_axes: parsed.target_axes ?? [],
-  }
-}
-
-// ─── Analysis API ─────────────────────────────────────────────────────────────
-
-function buildAnalysisPrompt(questions: Question[], answers: Answer[]): string {
-  const qa = answers.map((a) => {
-    const q = questions[a.questionIndex]
-    const choice = q?.choices.find((c) => c.id === a.choiceId)
-    return `【問${a.questionIndex + 1}】テーマ：${q?.theme}
-シナリオ：${q?.scenario}
-選択：${a.choiceId}. ${choice?.text ?? ''}${a.reason ? `\n理由：${a.reason}` : ''}`
-  }).join('\n\n')
-
-  return `あなたは哲学的思考分析の専門家です。
-以下のユーザーの回答を分析し、5つの哲学軸それぞれのスコアと分析文を生成してください。
-
-## ユーザーの回答
-${qa}
-
-## 5つの哲学軸（各0〜100でスコアリング）
-- ethics: 功利主義（0）⇔ 義務論（100）
-- will: 決定論（0）⇔ 自由意志（100）
-- individual: 共同体主義（0）⇔ 個人主義（100）
-- ontology: 唯物論（0）⇔ 観念論（100）
-- judgment: 感情主義（0）⇔ 理性主義（100）
-
-## 出力フォーマット（JSONのみ、他のテキスト不要）
-{
-  "scores": {
-    "ethics": <0-100>,
-    "will": <0-100>,
-    "individual": <0-100>,
-    "ontology": <0-100>,
-    "judgment": <0-100>
-  },
-  "analysis": "ユーザーの思考傾向の分析文（200〜350字）",
-  "philosophers": [
-    {
-      "name": "哲学者名",
-      "description": "哲学者の簡潔な説明（20字以内）",
-      "reason": "この哲学者と共鳴する理由（80〜120字）"
-    }
-  ]
-}
-
-analysisは回答の具体的な内容を反映した個別の分析にしてください。philosophersは2〜3人選び、選択理由にはユーザーの実際の回答パターンを具体的に言及してください。`
+  if (!res.ok) throw new Error('Failed to generate question')
+  return res.json() as Promise<Question>
 }
 
 async function analyzeAnswers(questions: Question[], answers: Answer[]): Promise<Result> {
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: buildAnalysisPrompt(questions, answers) }],
+  const res = await fetch('/api/analyze-answers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ questions, answers }),
   })
-
-  const raw = response.content[0].type === 'text' ? response.content[0].text : ''
-  const jsonText = raw.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '')
-  const parsed = JSON.parse(jsonText)
-
-  return {
-    scores: {
-      ethics: parsed.scores.ethics,
-      will: parsed.scores.will,
-      individual: parsed.scores.individual,
-      ontology: parsed.scores.ontology,
-      judgment: parsed.scores.judgment,
-    },
-    analysis: parsed.analysis,
-    philosophers: parsed.philosophers,
-  }
+  if (!res.ok) throw new Error('Failed to analyze answers')
+  return res.json() as Promise<Result>
 }
 
 // ─── IntroScreen ─────────────────────────────────────────────────────────────
